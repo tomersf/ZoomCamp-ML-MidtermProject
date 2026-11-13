@@ -12,5 +12,6 @@ dependencies = [
     "matplotlib>=3.11.2",
     "pandas>=3.1.1",
     "pyarrow>=26.0.1",
+    "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
 ]

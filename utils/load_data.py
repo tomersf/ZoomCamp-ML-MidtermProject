@@ -20,8 +20,7 @@ FULL_PATH = DATA_DIR / "wildfires_full.parquet"
 
 SQL_QUERY = """
     SELECT
-        FOD_ID,
-
+    
         -- Time
         FIRE_YEAR,
         DISCOVERY_DATE,
@@ -32,8 +31,6 @@ SQL_QUERY = """
         LATITUDE,
         LONGITUDE,
         STATE,
-        FIPS_CODE,
-        FIPS_NAME,
 
         -- Cause
         STAT_CAUSE_DESCR,
