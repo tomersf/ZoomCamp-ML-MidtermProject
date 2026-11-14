@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wildfire Severity Predictor</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #222; background: #f4f4f2; }
+  header { padding: 14px 20px; background: #b23a1e; color: #fff; }
+  header h1 { margin: 0; font-size: 1.2rem; }
+  header p { margin: 4px 0 0; font-size: .85rem; opacity: .9; }
+  main { display: flex; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  #map { flex: 2; height: 560px; border-radius: 8px; border: 1px solid #ccc; }
+  form { flex: 1; min-width: 280px; background: #fff; padding: 16px; border-radius: 8px; border: 1px solid #ddd; }
+  label { display: block; margin: 12px 0 4px; font-size: .85rem; font-weight: 600; }
+  input, select, button { width: 100%; padding: 8px; font-size: 1rem; border: 1px solid #bbb; border-radius: 6px; }
+  input[readonly] { background: #eee; }
+  .row { display: flex; gap: 8px; }
+  button { margin-top: 18px; background: #b23a1e; color: #fff; border: 0; cursor: pointer; font-weight: 600; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  #hint { font-size: .85rem; color: #666; margin-top: 4px; }
+  #result { margin-top: 16px; padding: 12px; border-radius: 8px; display: none; }
+  #result.large { background: #fde8e3; border: 1px solid #b23a1e; }
+  #result.small { background: #e6f4e6; border: 1px solid #3a8a3a; }
+  #result.error { background: #fff3cd; border: 1px solid #c9a100; }
+  #result .big { font-size: 1.2rem; font-weight: 700; }
+  .leaflet-tooltip.state-label { background: none; border: 0; box-shadow: none; padding: 0;
+    color: #222; opacity: .5; font-size: 11px; font-weight: 700; pointer-events: none; }
+  @media (max-width: 800px) { main { flex-direction: column; } #map { height: 380px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wildfire severity predictor</h1>
+  <p>Pick where the fire started, tell us when and why, and the model estimates whether it will grow large (10+ acres).</p>
+</header>
+
+<main>
+  <div id="map"></div>
+
+  <form id="form">
+    <div id="hint">Click a state on the map to place the fire.</div>
+
+    <label>State</label>
+    <input id="state" readonly placeholder="—" required>
+
+    <div class="row">
+      <div><label>Latitude</label><input id="lat" readonly placeholder="—" required></div>
+      <div><label>Longitude</label><input id="lng" readonly placeholder="—" required></div>
+    </div>
+
+    <label for="date">Discovery date</label>
+    <input id="date" type="date" required>
+
+    <label for="hour">Discovery hour (optional)</label>
+    <select id="hour"><option value="">Unknown</option></select>
+
+    <label for="cause">Cause</label>
+    <select id="cause" required></select>
+
+    <button id="submit" type="submit" disabled>Predict</button>
+    <div id="result"></div>
+  </form>
+</main>
+
+<script>
+const STATES = {
+  "Alabama":"AL","Alaska":"AK","Arizona":"AZ","Arkansas":"AR","California":"CA","Colorado":"CO",
+  "Connecticut":"CT","Delaware":"DE","District of Columbia":"DC","Florida":"FL","Georgia":"GA","Hawaii":"HI",
+  "Idaho":"ID","Illinois":"IL","Indiana":"IN","Iowa":"IA","Kansas":"KS","Kentucky":"KY","Louisiana":"LA",
+  "Maine":"ME","Maryland":"MD","Massachusetts":"MA","Michigan":"MI","Minnesota":"MN","Mississippi":"MS",
+  "Missouri":"MO","Montana":"MT","Nebraska":"NE","Nevada":"NV","New Hampshire":"NH","New Jersey":"NJ",
+  "New Mexico":"NM","New York":"NY","North Carolina":"NC","North Dakota":"ND","Ohio":"OH","Oklahoma":"OK",
+  "Oregon":"OR","Pennsylvania":"PA","Puerto Rico":"PR","Rhode Island":"RI","South Carolina":"SC",
+  "South Dakota":"SD","Tennessee":"TN","Texas":"TX","Utah":"UT","Vermont":"VT","Virginia":"VA",
+  "Washington":"WA","West Virginia":"WV","Wisconsin":"WI","Wyoming":"WY"
+};
+const CAUSES = ["Arson","Campfire","Children","Debris Burning","Equipment Use","Fireworks","Lightning",
+  "Miscellaneous","Missing/Undefined","Powerline","Railroad","Smoking","Structure"];
+
+const $ = id => document.getElementById(id);
+
+// Form defaults
+for (let h = 0; h < 24; h++) $("hour").add(new Option(String(h).padStart(2, "0") + ":00", h));
+CAUSES.forEach(c => $("cause").add(new Option(c, c)));
+const DEFAULTS = { lat: 33.5780, lng: -101.1182, date: "2005-07-28", hour: 13, cause: "Debris Burning" };
+$("date").value = DEFAULTS.date;
+$("hour").value = DEFAULTS.hour;
+$("cause").value = DEFAULTS.cause;
+
+// Map
+const map = L.map("map").setView([39.5, -98.35], 4);   // whole US; the default fire is in Texas
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 10, attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+const style = { color: "#b23a1e", weight: 1, fillColor: "#b23a1e", fillOpacity: 0.05 };
+let marker = null, selected = null;
+
+fetch("/static/us-states.json").then(r => r.json()).then(geo => {
+  const layer = L.geoJSON(geo, {
+    style: () => style,
+    onEachFeature: (feature, lyr) => {
+      lyr.on("mouseover", () => lyr !== selected && lyr.setStyle({ fillOpacity: 0.2 }));
+      lyr.on("mouseout", () => lyr !== selected && layer.resetStyle(lyr));
+      lyr.on("click", e => select(lyr, feature, e.latlng));
+    }
+  }).addTo(map);
+
+  function select(lyr, feature, latlng) {
+    if (selected) layer.resetStyle(selected);
+    selected = lyr;
+    lyr.setStyle({ fillOpacity: 0.35, weight: 2 });
+    if (marker) marker.remove();
+    marker = L.marker(latlng).addTo(map);
+    $("state").value = STATES[feature.properties.name];
+    $("lat").value = latlng.lat.toFixed(4);
+    // Western Aleutians extend past -180 on the map; the API accepts -180 to -60
+    $("lng").value = Math.max(latlng.lng, -180).toFixed(4);
+    $("submit").disabled = false;
+    $("hint").textContent = `${feature.properties.name} selected. Click elsewhere to move the fire.`;
+  }
+
+  // Default location: Texas
+  layer.eachLayer(lyr => {
+    if (lyr.feature.properties.name === "Texas") select(lyr, lyr.feature, L.latLng(DEFAULTS.lat, DEFAULTS.lng));
+  });
+
+  // State-code labels, centred on each state's largest landmass
+  const labels = geo.features.map(f => {
+    const polys = f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates;
+    const boxes = polys.map(p => L.latLngBounds(p[0].map(([lng, lat]) => [lat, lng])));
+    const area = b => (b.getNorth() - b.getSouth()) * (b.getEast() - b.getWest());
+    const main = boxes.reduce((a, b) => (area(b) > area(a) ? b : a));
+    return {
+      small: area(main) < 8,   // tiny states (RI, DE, DC, ...) only labelled when zoomed in
+      tip: L.tooltip({ permanent: true, direction: "center", className: "state-label", interactive: false })
+        .setLatLng(main.getCenter())
+        .setContent(STATES[f.properties.name]),
+    };
+  });
+  const updateLabels = () => labels.forEach(({ small, tip }) => {
+    const show = !small || map.getZoom() >= 6;
+    if (show && !map.hasLayer(tip)) tip.addTo(map);
+    if (!show && map.hasLayer(tip)) tip.remove();
+  });
+  map.on("zoomend", updateLabels);
+  updateLabels();
+}).catch(() => { $("hint").textContent = "Could not load the state map."; });
+
+// Predict
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const res = $("result");
+  const body = {
+    discovery_date: $("date").value,
+    discovery_hour: $("hour").value === "" ? null : Number($("hour").value),
+    latitude: Number($("lat").value),
+    longitude: Number($("lng").value),
+    state: $("state").value,
+    stat_cause_descr: $("cause").value,
+  };
+  $("submit").disabled = true;
+  try {
+    const r = await fetch("/predict", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    res.style.display = "block";
+    if (!r.ok) {
+      res.className = "error";
+      res.textContent = "Invalid input: " + data.detail.map(d => `${d.loc.slice(1).join(".")} (${d.msg})`).join("; ");
+    } else {
+      const pct = (data.probability_large * 100).toFixed(1);
+      res.className = data.is_large ? "large" : "small";
+      res.innerHTML = `<div class="big">${data.is_large ? "Likely to grow large" : "Likely to stay small"}</div>
+        <div>Probability of a large fire: <b>${pct}%</b></div>
+        <div>Flagged as large above ${(data.threshold * 100).toFixed(1)}%.</div>`;
+    }
+  } catch (err) {
+    res.style.display = "block";
+    res.className = "error";
+    res.textContent = "Could not reach the API: " + err.message;
+  } finally {
+    $("submit").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
